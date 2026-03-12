@@ -446,11 +446,16 @@ def sanitize_markdown(texte):
     Nettoie :
     - Les séparateurs de tableaux corrompus (ex: | :----...---- |)
     - Les balises <br> HTML dans les cellules (remplacées par ' / ')
+    - FIX: Clôture les lignes de tableau tronquées (cellule non fermée par |)
     """
-    # Remplacer <br> et variantes par un séparateur lisible
     texte = re.sub(r"<br\s*/?>\s*", " / ", texte, flags=re.IGNORECASE)
     lignes_propres = []
     for ligne in texte.split("\n"):
+        # FIX: clôturer les cellules de tableau non fermées (réponse tronquée)
+        if "|" in ligne and ligne.count("|") >= 2:
+            if not ligne.rstrip().endswith("|"):
+                ligne = ligne.rstrip() + " |"
+        # Normaliser les séparateurs de tableau trop longs
         if re.match(r"^\|?(\s*:?-{10,}:?\s*\|)+\s*$", ligne.strip()):
             nb_cols = max(ligne.count("|") - 1, 1)
             ligne = "| " + " | ".join(["---"] * nb_cols) + " |"
@@ -546,6 +551,7 @@ def ajouter_texte_markdown(doc, texte):
 
 # ==========================================================
 # INTERROGER L'AGENT EDF (SSE)
+# FIX: Détection du finish_reason "length" → réponse tronquée rejetée
 # ==========================================================
 def interroger_agent_sse(question, max_tentatives=3):
     print(f"➡ Question (Mode SSE) : {question[:120]}...")
@@ -561,6 +567,8 @@ def interroger_agent_sse(question, max_tentatives=3):
     for tentative in range(1, max_tentatives + 1):
         reponse_complete = ""
         tous_les_events = []
+        finish_reason = ""
+
         try:
             response = requests.post(
                 URL_QUERY, headers=HEADERS, json=body, stream=True, timeout=300
@@ -583,6 +591,10 @@ def interroger_agent_sse(question, max_tentatives=3):
                     data_json = json.loads(event.data)
                     if "answer" in data_json and data_json["answer"].strip():
                         reponse_complete = data_json["answer"]
+                    # FIX: capturer le finish_reason pour détecter les troncatures
+                    reasons = data_json.get("finishReasons", [])
+                    if reasons:
+                        finish_reason = reasons[0]
                 except Exception:
                     continue
 
@@ -601,6 +613,10 @@ def interroger_agent_sse(question, max_tentatives=3):
         # Log systématique de chaque tentative
         log(f"PROMPT - Tentative {tentative}/{max_tentatives}", question)
         log(
+            f"FINISH REASON - Tentative {tentative}/{max_tentatives}",
+            finish_reason if finish_reason else "(non détecté)",
+        )
+        log(
             f"EVENTS SSE BRUTS - Tentative {tentative}/{max_tentatives} ({len(tous_les_events)} events)",
             "\n---\n".join(tous_les_events)
             if tous_les_events
@@ -611,8 +627,26 @@ def interroger_agent_sse(question, max_tentatives=3):
             reponse_complete if reponse_complete else "(vide)",
         )
 
+        # FIX: réponse tronquée par limite de tokens → invalide, on retry
+        if finish_reason == "length":
+            print(
+                f"⚠ Réponse tronquée (finish_reason=length) — "
+                f"tentative {tentative}/{max_tentatives}, retry avec consigne de concision..."
+            )
+            # Renforcer la consigne de concision dans le body pour le retry
+            body["text"] = question + (
+                "\n\nIMPORTANT : Ta réponse précédente était trop longue et a été coupée. "
+                "Sois BEAUCOUP plus concis. MAX 60 caractères par cellule de tableau. "
+                "Résume chaque étape en une seule phrase courte. "
+                "Ne dépasse pas 15 lignes dans les tableaux."
+            )
+            time.sleep(10)
+            continue
+
         if len(reponse_complete.strip()) >= 50:
-            print(f"✅ Réponse reçue ({len(reponse_complete)} caractères)")
+            print(
+                f"✅ Réponse reçue ({len(reponse_complete)} caractères, finish_reason={finish_reason})"
+            )
             return reponse_complete
 
         print(
@@ -655,6 +689,7 @@ CHAPITRES_TITRES = [
 ]
 
 # 4. PROMPTS PAR CHAPITRE — contexte injecté dans chaque appel, historique désactivé
+# FIX: consignes de concision renforcées sur les tableaux pour éviter finish_reason=length
 PROMPTS = [
     f"""Tu es un agent IA générant une documentation technique vulgarisée.
 
@@ -667,7 +702,13 @@ Voici le contenu intégral de ces fichiers :
 ---
 En te basant uniquement sur ces fichiers, génère le '{titre_chapitre}'.
 Réponds directement avec le contenu du chapitre, sans introduction.
-Si tu utilises des tableaux markdown, garde les cellules courtes et concises (max 60 caractères par cellule)."""
+
+RÈGLES STRICTES DE FORMATAGE :
+- MAX 120 caractères par cellule de tableau, sans exception.
+- MAX 15 lignes dans les tableaux workflow.
+- Si une description est longue, résume-la en une phrase courte.
+- Utilise des bullet points séparés SOUS le tableau pour les détails si nécessaire.
+- Ne mets jamais de longues phrases à l'intérieur d'une cellule de tableau."""
     for titre_chapitre in CHAPITRES_TITRES
 ]
 
@@ -702,7 +743,7 @@ run.font.size = Pt(9)
 run.italic = True
 phrase_ia.alignment = 0
 
-# 6. GÉNÉRATION DES CHAPITRES
+# 7. GÉNÉRATION DES CHAPITRES
 print("--- Génération des chapitres ---")
 
 for i, (prompt, titre_chapitre) in enumerate(zip(PROMPTS, CHAPITRES_TITRES), start=1):
@@ -719,7 +760,7 @@ for i, (prompt, titre_chapitre) in enumerate(zip(PROMPTS, CHAPITRES_TITRES), sta
 
     print(f"📘 {titre_chapitre} généré.\n")
 
-# 7. SAUVEGARDE
+# 8. SAUVEGARDE
 chemin_sortie = os.path.join(DOSSIER_DOCUMENTS, NOM_FICHIER_SORTIE)
 doc_word.save(chemin_sortie)
 print(f"✅ Document Word généré : {chemin_sortie}\n")
