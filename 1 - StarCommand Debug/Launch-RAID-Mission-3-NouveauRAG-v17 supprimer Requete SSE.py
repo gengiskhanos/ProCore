@@ -21,12 +21,20 @@ from openpyxl import load_workbook
 # ==========================================================
 # VERSION & CHANGELOG
 # ==========================================================
-SCRIPT_VERSION = "v6-FORCE-RAG"
-# v6 : Ajout d'instruction OBLIGATOIRE de consultation du RAG,
-#      seuil anti-boucle abaissé de 50000 à 15000 chars,
-#      détection de blocs de texte répétés dans le nettoyeur,
-#      résumé cumulatif réduit à 200 chars/chapitre,
-#      instructions de concision sur chapitres 5-6.
+SCRIPT_VERSION = "v8.0-RAG-PRELOAD"
+# v8.0 : Refonte du démarrage et pré-chargement RAG (mars 2026)
+#   - Suppression du PROMPT_INITIAL inutile (3 tentatives SSE ~4min30 perdues,
+#     réponse basée sur les noms de fichiers et non sur le RAG, jamais injectée)
+#   - Remplacement par test de connectivité HTTP léger (GET /documents)
+#   - Ajout pré-analyse RAG globale : force une vraie lecture de tous les fichiers
+#     avant le ch.1, résultat injecté dans contexte_cumule dès le départ
+#   - interroger_agent_sse retourne maintenant (reponse, search_results)
+#   - valider_qualite_chapitre reçoit search_results et détecte l'absence de RAG
+#     pour les chapitres critiques (3, 4, 6)
+#   - construire_resume_chapitre filtre les nœuds/edges Mermaid du ch.2
+#     pour éviter que le ch.3 recopie le schéma comme workflow
+#   - construire_prompt_chapitre accepte pre_contexte optionnel
+#   - Pré-requête RAG dédiée avant ch.3 : extraction exhaustive des étapes/macros/logique
 
 # ==========================================================
 # SYSTÈME DE LOGGING DEBUG
@@ -98,7 +106,18 @@ def log_reponse_sse(
     log("── DIAGNOSTICS QUALITÉ ──────────────────────────────────────────────")
 
     mots = reponse_complete.split()
-    log(f"  Nb mots dans la réponse     : {len(mots)}")
+    nb_mots = len(mots)
+    log(f"  Nb mots dans la réponse     : {nb_mots}")
+
+    # v7 : diagnostic ratio mots/chars
+    if len(reponse_complete) > 0:
+        ratio = nb_mots / len(reponse_complete)
+        log(f"  Ratio mots/chars            : {ratio:.4f}")
+        if ratio < 0.02 and len(reponse_complete) > 1000:
+            log(
+                f"  ⚠️  ALERTE : Ratio très faible (<0.02) — probable boucle de formatage",
+                "WARN",
+            )
 
     if len(reponse_complete) < 100:
         log(
@@ -154,13 +173,20 @@ def log_reponse_sse(
 
     log("")
     log("── SOURCES RAG ──────────────────────────────────────────────────────")
-    if sources:
-        log(f"  Nb sources retournées : {len(sources)}")
-        for i, s in enumerate(sources):
+    # v7 : filtrer les None pour ne pas alarmer à tort
+    sources_reelles = [s for s in (sources or []) if s is not None]
+    if sources_reelles:
+        log(f"  Nb sources retournées : {len(sources_reelles)}")
+        for i, s in enumerate(sources_reelles):
             log(f"  [{i + 1}] {s}")
+    elif sources and len(sources) > 0:
+        log(
+            f"  ℹ️  {len(sources)} sources retournées mais sans URL (upload JSON = normal)",
+            "INFO",
+        )
     else:
         log(
-            "  ⚠️  Aucune source RAG retournée — le RAG n'a peut-être rien trouvé !",
+            "  ⚠️  Aucune source RAG retournée",
             "WARN",
         )
 
@@ -258,7 +284,6 @@ log(f"WAIT_BETWEEN_RETRY : {WAIT_BETWEEN_RETRY}s")
 
 # Paramètres API
 URL_DOCUMENT = "https://api.iag.edf.fr/v2/workspaces/HcA-puQ/webhooks/document"
-URL_DOCUMENTS_LIST = "https://api.iag.edf.fr/v2/workspaces/HcA-puQ/webhooks/documents"
 URL_QUERY = "https://api.iag.edf.fr/v2/workspaces/HcA-puQ/webhooks/query"
 URL_DELETE = "https://api.iag.edf.fr/v2/workspaces/HcA-puQ/webhooks/document"
 HEADERS = {"knowledge-project-apikey": API_KEY}
@@ -325,6 +350,111 @@ def parse_uipath_xaml(file_path):
         return {"type": "UiPath", "activities": activities, "variables": variables}
     except Exception as e:
         log(f"   ❌ Erreur parse XAML : {e}", "ERROR")
+        return {"error": str(e)}
+
+
+def parse_powerapps_yaml(file_path):
+    """
+    v7.1 : Parse les fichiers Power Apps Canvas (.pa.yaml).
+    Le YAML Power Apps utilise '=' comme préfixe de formule PowerFx,
+    ce qui casse yaml.safe_load. On parse donc en mode texte/regex.
+    Extrait : écrans, contrôles, formules, navigations, variables, data sources.
+    """
+    try:
+        with open(file_path, "r", encoding="utf-8") as f:
+            content = f.read()
+
+        basename = os.path.basename(file_path)
+        result = {"type": "Power Apps Canvas", "filename": basename}
+
+        # --- EditorState ---
+        if "EditorState:" in content:
+            result["type"] = "Power Apps EditorState"
+            result["screens_order"] = re.findall(r"^\s+- (\w+)$", content, re.MULTILINE)
+            log(f"   Power Apps EditorState : {result['screens_order']}")
+            return result
+
+        # --- App config ---
+        if content.strip().startswith("App:") or "\nApp:" in content:
+            result["type"] = "Power Apps App Config"
+            onstart = re.search(r"OnStart:\s*\|?-?\s*\n((?:\s{4,}.*\n)*)", content)
+            if onstart:
+                result["on_start"] = onstart.group(1).strip()
+            start = re.search(r"StartScreen:\s*=(\w+)", content)
+            if start:
+                result["start_screen"] = start.group(1)
+            log(f"   Power Apps App Config : start_screen={result.get('start_screen')}")
+            return result
+
+        # --- Screen file ---
+        screen = re.search(r"Screens:\n\s+(\w+):", content)
+        if screen:
+            result["screen_name"] = screen.group(1)
+
+        # Controls avec leur type
+        controls = re.findall(r"- (\w+):\s*\n\s+Control:\s*(\S+)", content)
+        result["controls"] = [{"name": c[0], "type": c[1]} for c in controls]
+
+        # Navigate() calls
+        result["navigations"] = sorted(set(re.findall(r"Navigate\((\w+)", content)))
+
+        # Variables Set() et Collect()
+        result["variables_set"] = sorted(set(re.findall(r"Set\((\w+)", content)))
+        result["collections"] = sorted(
+            set(re.findall(r"(?:Collect|ClearCollect)\((\w+)", content))
+        )
+
+        # Formules significatives (OnSelect, OnChange, OnVisible, Items)
+        formulas = []
+        for key, formula in re.findall(
+            r"(OnSelect|OnChange|OnVisible|Items|OnStart):\s*=(.*)", content
+        ):
+            f = formula.strip()
+            if len(f) > 10:
+                formulas.append({"property": key, "formula": f[:300]})
+        # Formules multilignes
+        for m in re.finditer(
+            r"(OnSelect|OnChange|OnVisible|Items):\s*\|?-?\s*\n(\s+=.*?)(?=\n\s+\w+:|\n\s+-\s)",
+            content,
+            re.DOTALL,
+        ):
+            f = m.group(2).strip().lstrip("=")
+            if len(f) > 10:
+                formulas.append({"property": m.group(1), "formula": f[:300]})
+        result["formulas"] = formulas[:40]
+
+        # Data sources — noms entre apostrophes dans les formules
+        candidates = re.findall(r"'([A-Z][A-Za-zÀ-ÿ0-9_ -]{3,50})'", content)
+        EXCLUDE = {
+            "Font",
+            "Segoe UI",
+            "Open Sans",
+            "RGBA",
+            "Color",
+            "Self",
+            "Parent",
+            "ThisItem",
+            "Align",
+            "VerticalAlign",
+            "DisplayMode",
+            "FontWeight",
+            "ScreenTransition",
+            "Icon",
+            "BorderStyle",
+            "DataSourceInfo",
+        }
+        ds = sorted(set(c for c in candidates if c not in EXCLUDE))
+        result["data_sources"] = ds[:20]
+
+        log(
+            f"   Power Apps Screen '{result.get('screen_name')}' : "
+            f"{len(result['controls'])} contrôles, "
+            f"{len(result['formulas'])} formules, "
+            f"navigations={result['navigations']}"
+        )
+        return result
+    except Exception as e:
+        log(f"   ❌ Erreur parse Power Apps YAML : {e}", "ERROR")
         return {"error": str(e)}
 
 
@@ -553,6 +683,8 @@ def convertir_si_necessaire(chemin_fichier):
         ".m": parse_powerquery_m,
         ".xlsm": extract_excel_logic_universal,
         ".xlsx": extract_excel_logic_universal,
+        ".yaml": parse_powerapps_yaml,
+        ".yml": parse_powerapps_yaml,
     }
     if ext not in mapping:
         return chemin_fichier
@@ -582,16 +714,13 @@ def extraire_texte_docx_complet(chemin_docx):
         doc_temp = DocxReader(chemin_docx)
         texte_parties = []
 
-        # Paragraphes classiques
         for p in doc_temp.paragraphs:
             if p.text.strip():
                 texte_parties.append(p.text.strip())
 
-        # Tableaux (souvent le contenu principal dans les fiches EDF)
         for table in doc_temp.tables:
             for row in table.rows:
                 row_text = " | ".join(cell.text.strip() for cell in row.cells)
-                # Éviter les lignes vides ou ne contenant que des séparateurs
                 if row_text.replace("|", "").replace(" ", ""):
                     texte_parties.append(row_text)
 
@@ -742,7 +871,6 @@ def uploader_les_documents(dossier_path):
 
         ext_upload = os.path.splitext(chemin_upload)[1].lower()
 
-        # Lire le contenu textuel du fichier
         texte_contenu = None
         if ext_upload in [".json", ".txt", ".csv", ".m", ".py", ".xml"]:
             try:
@@ -752,7 +880,6 @@ def uploader_les_documents(dossier_path):
                 with open(chemin_upload, "r", encoding="latin-1") as f:
                     texte_contenu = f.read()
         elif ext_upload in [".docx"]:
-            # CORRECTIF v5 : extraction enrichie incluant les tableaux
             texte_contenu = extraire_texte_docx_complet(chemin_upload)
 
         if texte_contenu:
@@ -784,7 +911,8 @@ def uploader_les_documents(dossier_path):
                 resp_json = response.json()
                 log_json(f"   Réponse API upload de {nom_upload}", resp_json)
 
-                doc_id = resp_json.get("_id")
+                # v7 : chercher l'ID dans plusieurs clés possibles
+                doc_id = resp_json.get("_id") or resp_json.get("id")
                 if (
                     not doc_id
                     and "search" in resp_json
@@ -792,7 +920,7 @@ def uploader_les_documents(dossier_path):
                 ):
                     results = resp_json["search"]["results"]
                     if results:
-                        doc_id = results[0].get("_id")
+                        doc_id = results[0].get("_id") or results[0].get("id")
             except Exception as e:
                 log(f"   ❌ Erreur parsing réponse upload : {e}", "ERROR")
 
@@ -816,57 +944,42 @@ def uploader_les_documents(dossier_path):
 
 
 # ==========================================================
-# VÉRIFICATION DE L'INDEXATION (sans filtre _id, via listing complet)
-# ==========================================================
-def verifier_indexation(ids_rag):
-    """
-    Vérifie que les documents sont indexés via /documents sans filtre _id.
-    Le filtre _id ne fonctionne pas sur le nouveau portail Prisme,
-    donc on liste tous les docs et on compare les IDs.
-    """
-    log_separateur("VÉRIFICATION DE L'INDEXATION")
-
-    url = f"{URL_DOCUMENTS_LIST}?projectId={PROJECT_ID}&limit=100"
-    response = requete_avec_retry("GET", url, headers=HEADERS)
-
-    if response:
-        try:
-            resp_data = response.json()
-            if isinstance(resp_data, list):
-                docs = resp_data
-            elif isinstance(resp_data, dict):
-                docs = resp_data.get("results", resp_data.get("documents", []))
-            else:
-                docs = []
-
-            # Compter combien de nos IDs sont dans la liste
-            ids_trouves = set()
-            for d in docs:
-                if isinstance(d, dict):
-                    doc_id = d.get("_id", "")
-                    if doc_id in ids_rag:
-                        ids_trouves.add(doc_id)
-                        log(f"  ✅ {d.get('name', 'N/A')} (id: {doc_id})")
-
-            log(f"Documents retrouvés dans le RAG : {len(ids_trouves)}/{len(ids_rag)}")
-
-            if len(ids_trouves) >= len(ids_rag):
-                log(f"✅ Tous les documents sont indexés")
-                return True
-            else:
-                manquants = set(ids_rag) - ids_trouves
-                log(f"⚠️  IDs manquants : {manquants}", "WARN")
-                return False
-        except Exception as e:
-            log(f"⚠️  Erreur lors de la vérification : {e}", "WARN")
-            return False
-    else:
-        log("⚠️  Impossible de vérifier l'indexation", "WARN")
-        return False
 
 
 # ==========================================================
-# DÉTECTION DE BOUCLE DE RÉPÉTITION
+# NORMALISATION MARKDOWN — v7 anti-boucle
+# ==========================================================
+def normaliser_tableaux_markdown(texte):
+    """
+    v7 : Normalise les séparateurs de tableau Markdown.
+    Remplace les longues séries de tirets (cause de boucle Gemini)
+    par des séparateurs courts et propres.
+    """
+    if not texte:
+        return texte
+
+    lignes = texte.split("\n")
+    resultat = []
+
+    for ligne in lignes:
+        stripped = ligne.strip()
+        # Détecter les lignes de séparateurs de tableau : |---|---|...|
+        if re.match(r"^\|[\s\-:|]+\|$", stripped):
+            # Compter le nombre de colonnes
+            nb_cols = stripped.count("|") - 1
+            if nb_cols > 0:
+                separateur_propre = "| " + " | ".join(["---"] * nb_cols) + " |"
+                resultat.append(separateur_propre)
+            else:
+                resultat.append(stripped)
+        else:
+            resultat.append(ligne)
+
+    return "\n".join(resultat)
+
+
+# ==========================================================
+# DÉTECTION DE BOUCLE DE RÉPÉTITION — v7 améliorée
 # ==========================================================
 def nettoyer_reponse_boucle(reponse):
     if not reponse or len(reponse) < 3000:
@@ -898,19 +1011,14 @@ def nettoyer_reponse_boucle(reponse):
 
     reponse_nettoyee = "\n".join(lignes_nettoyees)
 
-    # CORRECTIF v6 : détection de blocs de texte répétés
-    # Si la réponse fait > 8000 chars, on vérifie si la 2e moitié
-    # est une répétition de la 1re moitié
+    # Détection de blocs de texte répétés
     if len(reponse_nettoyee) > 8000:
         moitie = len(reponse_nettoyee) // 2
         premiere_moitie = reponse_nettoyee[:moitie]
         deuxieme_moitie = reponse_nettoyee[moitie:]
-        # Calcul de similarité simple : ratio de texte commun
-        # On compare les 500 premiers chars de chaque moitié
         sample_1 = premiere_moitie[:500].strip()
         sample_2 = deuxieme_moitie[:500].strip()
         if sample_1 and sample_2:
-            # Si les 500 premiers chars de la 2e moitié se trouvent dans la 1re moitié
             if sample_2[:200] in premiere_moitie:
                 reponse_nettoyee = premiere_moitie.rstrip()
                 log(
@@ -924,20 +1032,104 @@ def nettoyer_reponse_boucle(reponse):
             "WARN",
         )
 
+    # v7 : normaliser les séparateurs de tableau après nettoyage
+    reponse_nettoyee = normaliser_tableaux_markdown(reponse_nettoyee)
+
     return reponse_nettoyee
 
 
 # ==========================================================
-# INTERROGER L'AGENT SSE (avec retry)
+# VALIDATION QUALITÉ — v7 nouveau
+# ==========================================================
+def valider_qualite_chapitre(titre, reponse, search_results=None):
+    """
+    v8.0 : Valide la qualité d'une réponse générée.
+    Retourne (True, "OK") si exploitable, (False, raison) sinon.
+    Inclut des seuils minimum par chapitre pour les chapitres multi-sections.
+    Détecte l'absence de consultation RAG pour les chapitres critiques.
+    """
+    issues = []
+
+    if not reponse or len(reponse.strip()) == 0:
+        return False, "Réponse vide"
+
+    nb_mots = len(reponse.split())
+
+    # Ratio mots/chars : si < 2%, c'est quasi que du formatage
+    if len(reponse) > 1000:
+        ratio = nb_mots / len(reponse)
+        if ratio < 0.02:
+            issues.append(
+                f"Ratio mots/chars trop faible ({ratio:.4f} — probable boucle de formatage)"
+            )
+
+    # Détection de séparateurs de tableau excessifs
+    nb_separateurs = reponse.count("---")
+    if nb_separateurs > 50:
+        issues.append(f"Trop de séparateurs de tableau ({nb_separateurs})")
+
+    # Détection de lignes dupliquées
+    lignes = [l.strip() for l in reponse.split("\n") if l.strip()]
+    if len(lignes) > 10:
+        unique = set(lignes)
+        if len(unique) < len(lignes) * 0.3:
+            issues.append(
+                f"Plus de 70% de lignes dupliquées ({len(unique)} uniques / {len(lignes)} total)"
+            )
+
+    # Seuils minimum par chapitre (en mots)
+    SEUILS_MIN_MOTS = {
+        "Chapitre 1 : Identité du Projet": 80,
+        "Chapitre 2 : Architecture générale": 100,
+        "Chapitre 3 : Description étape par étape": 250,
+        "Chapitre 4 : Cartographie des Données (Technique)": 150,
+        "Chapitre 5 : Recommandations": 100,
+        "Chapitre 6 : Maintenabilité": 150,
+    }
+    seuil = SEUILS_MIN_MOTS.get(titre, 50)
+    if nb_mots < seuil:
+        issues.append(
+            f"Trop court pour ce chapitre ({nb_mots} mots, minimum attendu : {seuil})"
+        )
+
+    # Vérification des sections manquantes pour le chapitre 3
+    if titre == "Chapitre 3 : Description étape par étape":
+        sections_attendues = ["vigilance", "interface", "inter-outil"]
+        texte_lower = reponse.lower()
+        sections_trouvees = sum(1 for s in sections_attendues if s in texte_lower)
+        if sections_trouvees == 0:
+            issues.append(
+                "Chapitre 3 incomplet : il manque les sections Points de vigilance / Interfaces Inter-outils"
+            )
+
+    # v8 : Détection absence de consultation RAG pour les chapitres critiques
+    # Ces chapitres nécessitent impérativement des données extraites des fichiers sources
+    CHAPITRES_RAG_CRITIQUE = {
+        "Chapitre 3 : Description étape par étape",
+        "Chapitre 4 : Cartographie des Données (Technique)",
+        "Chapitre 6 : Maintenabilité",
+    }
+    if titre in CHAPITRES_RAG_CRITIQUE:
+        if search_results is not None and len(search_results) == 0:
+            issues.append(
+                "RAG non consulté (search.results vide) — contenu basé sur contexte seul, risque d'hallucination"
+            )
+
+    if issues:
+        return False, "; ".join(issues)
+    return True, "OK"
+
+
+# ==========================================================
+# INTERROGER L'AGENT SSE (avec retry) — v7 amélioré
 # ==========================================================
 def interroger_agent_sse(
-    question, titre_chapitre="", tentative_num=1, max_tentatives=2
+    question, titre_chapitre="", tentative_num=1, max_tentatives=3
 ):
     log_separateur(
         f"REQUÊTE SSE — {titre_chapitre or 'sans titre'} (tentative {tentative_num}/{max_tentatives})"
     )
     log(f"Prompt envoyé ({len(question)} chars) :")
-    # Log les 800 premiers chars pour voir le prompt enrichi
     log(f"  {question[:800]}")
     if len(question) > 800:
         log(f"  ... [tronqué, longueur totale : {len(question)}]")
@@ -947,8 +1139,6 @@ def interroger_agent_sse(
         "projectId": PROJECT_ID,
         "userId": "script_python_doc_gen",
         "sse": True,
-        # CORRECTIF v5 : max_tokens aligné sur la config portail (6000)
-        # mais on demande 6000 pour laisser la marge max au modèle
         "projectConfigOverride": {"ai": {"max_tokens": 6000}},
     }
 
@@ -1025,15 +1215,23 @@ def interroger_agent_sse(
                         nb_chunks += 1
                         reponses_par_message[msg_id] = nouvelle_valeur
 
-                        # CORRECTIF v6 : seuil abaissé de 50000 à 15000
-                        # Gemini entre en boucle sur les chapitres longs,
-                        # 15000 chars est largement suffisant pour un chapitre.
-                        if len(nouvelle_valeur) > 15000:
+                        # v7 : seuil anti-boucle par taille
+                        if len(nouvelle_valeur) > 12000:
                             log(
-                                f"   ⚠️  Réponse > 15000 chars ({len(nouvelle_valeur)}) — interruption préventive",
+                                f"   ⚠️  Réponse > 12000 chars ({len(nouvelle_valeur)}) — interruption préventive",
                                 "WARN",
                             )
                             break
+
+                        # v7 : détection boucle par ratio mots/chars en temps réel
+                        if len(nouvelle_valeur) > 5000:
+                            nb_mots_courant = len(nouvelle_valeur.split())
+                            if nb_mots_courant < 100:
+                                log(
+                                    f"   ⚠️  Boucle de formatage détectée ({nb_mots_courant} mots / {len(nouvelle_valeur)} chars) — interruption",
+                                    "WARN",
+                                )
+                                break
 
                 if data_json.get("end") is True and "messageId" in data_json:
                     dernier_message_id = data_json.get("messageId")
@@ -1084,7 +1282,7 @@ def interroger_agent_sse(
     # Retry si réponse insuffisante
     nb_placeholders = reponse_complete.lower().count("donnée non identifiée")
     reponse_trop_courte = len(reponse_complete) < 300
-    reponse_que_placeholders = nb_placeholders > 3
+    reponse_que_placeholders = nb_placeholders > 5
 
     if (
         reponse_trop_courte or reponse_que_placeholders
@@ -1101,7 +1299,8 @@ def interroger_agent_sse(
             max_tentatives=max_tentatives,
         )
 
-    return reponse_complete
+    # v8 : retourne aussi les search_results pour la validation qualité
+    return reponse_complete, search_results_finaux
 
 
 # ==========================================================
@@ -1120,154 +1319,214 @@ def supprimer_documents(ids):
 
 
 # ==========================================================
-# PROMPTS ENRICHIS — Structure complète injectée
+# PROMPTS ENRICHIS v7 — Simplifiés + anti-boucle + XML structuré
 # ==========================================================
+
+# Instruction anti-boucle commune à tous les chapitres
+REGLE_ANTI_BOUCLE = (
+    "\n<regle_formatage>\n"
+    "RÈGLES MARKDOWN OBLIGATOIRES :\n"
+    "- Séparateurs de tableau : EXACTEMENT 3 tirets par colonne (|---|). Jamais plus.\n"
+    "- Maximum 20 lignes par tableau. Si plus de données, résume le reste en texte.\n"
+    "- Maximum 6 colonnes par tableau.\n"
+    "- Cellules courtes : pas de phrases longues dans les cellules de tableau.\n"
+    "- Si tu détectes que tu répètes le même pattern, STOP immédiatement.\n"
+    "</regle_formatage>\n"
+)
 
 
 def construire_prompt_chapitre(
-    titre_chapitre, noms_documents_str, num_dossier, contexte_cumule=""
+    titre_chapitre, noms_documents_str, num_dossier, contexte_cumule="", pre_contexte=""
 ):
     """
-    Construit un prompt enrichi pour chaque chapitre en injectant :
-    - La liste des fichiers du projet
-    - La structure attendue du chapitre (extraite du prompt système)
-    - Le contexte cumulé des chapitres précédents
-    - Des instructions explicites de longueur et d'exhaustivité
+    v8.0 : Construit le prompt d'un chapitre.
+    - pre_contexte : résultat d'une pré-requête RAG dédiée (ex: extraction ch.3)
+      injecté juste avant la <tache> pour ancrer le modèle sur des données réelles.
     """
 
-    # Contexte commun à tous les prompts
-    # CORRECTIF v6 : instruction explicite de consulter le RAG avant de répondre.
-    # Sans cette instruction, Gemini Pro/Flash court-circuite l'appel au RAG
-    # quand le prompt est assez détaillé pour qu'il "devine" une réponse.
+    # Chapitres nécessitant impérativement une consultation RAG approfondie
+    CHAPITRES_RAG_INTENSIF = {
+        "Chapitre 3 : Description étape par étape",
+        "Chapitre 4 : Cartographie des Données (Technique)",
+        "Chapitre 6 : Maintenabilité",
+    }
+
+    # Contexte de base
     contexte_base = (
-        f"INSTRUCTION CRITIQUE : Tu DOIS OBLIGATOIREMENT consulter les documents du RAG "
-        f"avant de rédiger ta réponse. Utilise l'outil de recherche dans la base de connaissances "
-        f"pour retrouver les informations factuelles. Ne réponds JAMAIS de mémoire ou par déduction "
-        f"sans avoir d'abord lu les fichiers sources. Toute donnée non trouvée dans le RAG doit être "
-        f"marquée '[Donnée non identifiée dans les sources]'.\n\n"
-        f"Projet dossier {num_dossier}. Fichiers dans le RAG : {noms_documents_str}.\n"
-        f"Analyse TOUS ces fichiers en profondeur. Extrais et développe chaque information pertinente. "
-        f"Ne résume pas, sois exhaustif. Ta réponse doit faire au minimum 1500 caractères.\n"
+        f"<contexte>\n"
+        f"Projet dossier {num_dossier}.\n"
+        f"Fichiers disponibles dans le RAG : {noms_documents_str}.\n"
     )
+
+    if titre_chapitre in CHAPITRES_RAG_INTENSIF:
+        contexte_base += (
+            f"IMPORTANT : Consulte les documents du RAG via l'outil de recherche "
+            f"avant de rédiger. Ce chapitre nécessite des données factuelles "
+            f"extraites des fichiers sources.\n"
+        )
+
+    contexte_base += f"</contexte>\n"
 
     if contexte_cumule:
         contexte_base += (
-            f"\nContexte des chapitres précédents pour cohérence :\n{contexte_cumule}\n"
+            f"\n<chapitres_precedents>\n{contexte_cumule}\n</chapitres_precedents>\n"
         )
+
+    # v8 : injection du pré-contexte RAG dédié si fourni
+    if pre_contexte:
+        contexte_base += f"\n{pre_contexte}\n"
 
     # Structures spécifiques par chapitre
     structures = {
         "Chapitre 1 : Identité du Projet": (
-            "Génère le contenu du Chapitre 1 : Identité du Projet.\n"
-            "Structure OBLIGATOIRE à remplir :\n"
+            "<tache>Génère le contenu du Chapitre 1 : Identité du Projet.</tache>\n"
+            "<structure>\n"
+            "Remplis ces sections :\n"
             "- **Nom du projet** : Extrais le nom exact depuis ficheStarcommand.txt\n"
             "- **Auteur(s)** : Propriétaire et Co-propriétaire depuis ficheStarcommand.txt\n"
-            "- **Mission** : Résumé détaillé du besoin métier — explique POURQUOI ce projet existe, "
-            "quel problème il résout, pour qui, avec quelles contraintes. Développe en 3-5 phrases.\n"
-            "- **Périmètre** : Fréquence d'usage (mensuelle, trimestrielle, etc), population cible "
-            "(quelle équipe, quel service), type de données traitées (nature, sensibilité RGPD, volume).\n"
-            "Commence directement par le contenu sans titre ni conversation."
+            "- **Mission** : Résumé détaillé du besoin métier en 3-5 phrases. "
+            "Explique POURQUOI ce projet existe, quel problème il résout, pour qui.\n"
+            "- **Périmètre** : Fréquence d'usage, population cible, type de données traitées "
+            "(nature, sensibilité RGPD, volume).\n"
+            "</structure>\n"
+            "Commence directement par le contenu. Pas de titre de chapitre."
         ),
         "Chapitre 2 : Architecture générale": (
-            "Génère le contenu du Chapitre 2 : Architecture générale.\n"
-            "Structure OBLIGATOIRE :\n"
-            "- **Schéma de flux (Mermaid)** : Crée un diagramme graph LR montrant l'enchaînement "
-            "complet des outils. Utilise des subgraph pour Acteurs, Systèmes, Stockage. "
-            "Chaque nœud avec guillemets doubles. Montre les 8-12 étapes principales du flux.\n"
-            "- **Stack Technologique** : Pour CHAQUE technologie identifiée, donne :\n"
-            "  * Le nom et la version si disponible\n"
-            "  * Son rôle précis dans le projet (pas juste le nom, explique ce qu'il fait)\n"
-            "  * Exemples : UiPath = orchestration RPA, VBA = calculs dans Excel, etc.\n"
-            "Développe la description de chaque techno en 1-2 phrases.\n"
-            "Commence directement par le contenu sans titre ni conversation."
+            "<tache>Génère le contenu du Chapitre 2 : Architecture générale.</tache>\n"
+            "<structure>\n"
+            "- **Schéma de flux (Mermaid)** : Diagramme graph LR avec subgraph. "
+            "Chaque arrête (edge) doit être numéroté dans l'ordre "
+            'du flux dans son libellé, exemple : A -- "1. Dépose fichier" --> G. '
+            "Nœuds avec guillemets doubles. 8-12 étapes numérotées.\n"
+            "- **Technologies** : Pour CHAQUE technologie, donne le nom, "
+            "son rôle précis dans le projet (1-2 phrases).\n"
+            "</structure>\n"
+            "Commence directement par le contenu. Pas de titre de chapitre."
         ),
         "Chapitre 3 : Description étape par étape": (
-            "Génère le contenu du Chapitre 3 : Description étape par étape.\n"
-            "Structure OBLIGATOIRE :\n"
-            "- **Workflow** : Tableau avec max 15 étapes. Colonnes : Étape | Outil | Action réalisée | Ce qui est impacté.\n"
-            "  MAX 80 caractères par cellule.\n"
-            "- **Points de vigilance** : Identifie les boucles ForEach, les conditions If/Case, "
-            "et les fragilités de maintenance. Développe chaque point.\n"
-            "- **Interfaces Inter-outils** : Pour chaque transfert de données entre outils, précise :\n"
-            "  * Comment la donnée passe (HTTP, fichier, copier-coller, raccourci clavier...)\n"
-            "  * Si c'est Synchrone ou Asynchrone\n"
-            "- **Spécificités Macro Excel** (si VBA détecté) : Tableau avec Feuille | Macro/Formule | "
-            "Description détaillée et liens avec les autres éléments du projet.\n"
-            "  Analyse le code VBA de chaque module et décris la logique de fonctionnement.\n"
-            "- **Spécificités UiPath** (si Main.xaml détecté) : Décris les séquences principales, "
-            "les variables clés et les interactions avec Excel.\n"
-            "Commence directement par le contenu sans titre ni conversation."
+            "<tache>Génère le contenu COMPLET du Chapitre 3 : Description étape par étape.\n"
+            "INTERDIT : Ne déduis pas les étapes depuis le schéma Mermaid du chapitre 2. "
+            "Appuie-toi sur les données extraites du RAG ci-dessus pour rédiger un workflow "
+            "granulaire de 15 à 25 étapes reflétant la logique réelle du projet "
+            "(boucles, conditions, appels de macros, gestion des fichiers, traitements métier). "
+            "Ce chapitre comporte 4 sections obligatoires (ou 5 si UiPath détecté). "
+            "Ne t'arrête pas après le tableau Workflow.</tache>\n"
+            "<structure>\n"
+            "SECTION 1 — **Workflow** : Tableau avec colonnes : Étape | Outil | Action réalisée | Ce qui est impacté.\n"
+            "15 à 25 lignes granulaires. Cellules courtes et précises.\n"
+            "\n"
+            "SECTION 2 — **Points de vigilance** : Boucles, conditions, fragilités. "
+            "Développe chaque point en 1-2 phrases de texte (pas de tableau).\n"
+            "\n"
+            "SECTION 3 — **Interfaces Inter-outils** : Pour chaque transfert de données entre outils, "
+            "indique le mécanisme (fichier sur réseau, ouverture Excel, copier-coller, API...) "
+            "et si c'est Synchrone ou Asynchrone. Rédige en texte ou en liste à puces.\n"
+            "\n"
+            "SECTION 4 — **Spécificités techniques** (selon les fichiers présents) :\n"
+            "  - Si VBA détecté dans des fichiers .xlsm : tableau Feuille | Macro/Formule | Description.\n"
+            "  - Si Power Query détecté : liste des requêtes M et leur rôle.\n"
+            "  - Si Power Automate détecté : liste des actions et connecteurs.\n"
+            "  - Si Power Apps détecté : écrans principaux, formules clés, sources de données.\n"
+            "\n"
+            "SECTION 5 — **Spécificités UiPath** (si Main.xaml détecté) : Séquences principales, "
+            "variables clés, interactions avec les autres outils.\n"
+            "</structure>\n"
+            "Commence directement par le contenu. Pas de titre de chapitre. "
+            "Tu DOIS remplir toutes les sections applicables aux fichiers présents."
         ),
         "Chapitre 4 : Cartographie des Données (Technique)": (
-            "Génère le contenu du Chapitre 4 : Cartographie des Données.\n"
-            "Structure OBLIGATOIRE :\n"
-            "- **Sources & Destinations** : Pour CHAQUE source et destination identifiée :\n"
-            "  * Nom exact de la source/destination\n"
-            "  * Type : API, Fichier Excel, Réseau, Teams, etc.\n"
-            "  * Mode : Lecture, Écriture, ou les deux\n"
-            "  * Description de ce qui transite\n"
+            "<tache>Génère le contenu du Chapitre 4 : Cartographie des Données.</tache>\n"
+            "<structure>\n"
+            "- **Sources & Destinations** : Pour chaque source/destination :\n"
+            "  Nom | Type (API, Fichier, Réseau, Teams...) | Mode (Lecture/Écriture) | Description.\n"
             "- **Dictionnaire des données et Variables** : Tableau avec :\n"
-            "  * Fichier dans lequel se trouve la variable\n"
-            "  * Nom de la variable\n"
-            "  * Type (String, Int, DataTable, etc.)\n"
-            "  * Comment elle est utilisée\n"
-            "  Extrais les variables depuis Main.xaml_parsed.json ET les colonnes depuis les fichiers Excel.\n"
-            "Commence directement par le contenu sans titre ni conversation."
+            "  Fichier | Nom de la variable | Type (String, Int, DataTable...) | Utilisation.\n"
+            "  Extrais depuis les fichiers _parsed.json disponibles dans le RAG.\n"
+            "</structure>\n"
+            "Commence directement par le contenu. Pas de titre de chapitre."
         ),
         "Chapitre 5 : Recommandations": (
-            "Génère le contenu du Chapitre 5 : Recommandations.\n"
-            "IMPORTANT : Sois concis et synthétique. Maximum 6-8 lignes de tableau.\n"
-            "Structure OBLIGATOIRE :\n"
-            "- **Améliorations possibles** : Tableau avec colonnes : Domaine | Recommandation | Impact attendu | Priorité.\n"
-            "  Couvre au minimum ces axes :\n"
-            "  * Performance (vitesse d'exécution, optimisation)\n"
-            "  * Robustesse (gestion des erreurs, cas limites)\n"
-            "  * Maintenabilité (simplification, factorisation du code)\n"
-            "  * Sécurité (RGPD, accès, chemins en dur)\n"
-            "  * Évolutivité (migration possible, modernisation)\n"
-            "  Donne au minimum 6 recommandations détaillées.\n"
-            "Commence directement par le contenu sans titre ni conversation."
+            "<tache>Génère le contenu du Chapitre 5 : Recommandations.</tache>\n"
+            "<structure>\n"
+            "Produis un tableau avec exactement ces colonnes :\n"
+            "| Domaine | Recommandation | Impact attendu | Priorité |\n"
+            "| --- | --- | --- | --- |\n"
+            "\n"
+            "Produis entre 6 et 8 lignes couvrant : Performance, Robustesse, "
+            "Maintenabilité, Sécurité/RGPD, Évolutivité.\n"
+            "</structure>\n"
+            "Commence directement par le tableau. Pas de titre de chapitre."
         ),
         "Chapitre 6 : Maintenabilité": (
-            "Génère le contenu du Chapitre 6 : Maintenabilité.\n"
-            "IMPORTANT : Sois concis. Chaque section en 2-4 phrases maximum.\n"
-            "Structure OBLIGATOIRE :\n"
-            "- **Score de Complexité** : [Bas/Moyen/Haut] avec justification détaillée (3-4 phrases).\n"
-            "- **Audit nécessaire ?** : [Oui/Non] avec justification basée sur la sécurité, "
-            "la criticité et la transversalité.\n"
-            "- **Indice de Maintenabilité** : Score XX/100 avec tableau de calcul :\n"
-            "  | Pilier | Score /25 | Justification |\n"
-            "  | Homogénéité | X/25 | Moins de technos = mieux |\n"
-            "  | Standardisation | X/25 | Fonctions natives vs contournements |\n"
-            "  | Documentation Source | X/25 | Commentaires, noms clairs |\n"
-            "  | Dépendances Critiques | X/25 | Liens fragiles, chemins locaux |\n"
-            "- **Points forts** : Ce qui facilite la reprise (3-4 points développés).\n"
-            "- **Points de fragilité** : Ce qui risque de casser à la prochaine mise à jour "
-            "(3-4 points développés avec explication technique).\n"
-            "Commence directement par le contenu sans titre ni conversation."
+            "<tache>Génère le contenu du Chapitre 6 : Maintenabilité.</tache>\n"
+            "<structure>\n"
+            "Sois concis. Chaque section en 2-4 phrases.\n"
+            "- **Score de Complexité** : [Bas/Moyen/Haut] avec justification.\n"
+            "- **Audit nécessaire ?** : [Oui/Non] avec justification.\n"
+            "- **Indice de Maintenabilité** : Score XX/100 avec ce tableau :\n"
+            "| Pilier | Score /25 | Justification |\n"
+            "| --- | --- | --- |\n"
+            "| Homogénéité | X/25 | ... |\n"
+            "| Standardisation | X/25 | ... |\n"
+            "| Documentation Source | X/25 | ... |\n"
+            "| Dépendances Critiques | X/25 | ... |\n"
+            "- **Points forts** : 3-4 points qui facilitent la reprise.\n"
+            "- **Points de fragilité** : 3-4 points de risque technique.\n"
+            "</structure>\n"
+            "Commence directement par le contenu. Pas de titre de chapitre."
         ),
     }
 
     structure_chapitre = structures.get(
-        titre_chapitre, f"Génère le contenu du '{titre_chapitre}'."
+        titre_chapitre, f"<tache>Génère le contenu de '{titre_chapitre}'.</tache>"
     )
 
-    prompt_complet = f"{contexte_base}\n{structure_chapitre}"
+    # assemblage : contexte (+ pré-contexte RAG si fourni) + structure + anti-boucle
+    prompt_complet = f"{contexte_base}\n{structure_chapitre}\n{REGLE_ANTI_BOUCLE}"
 
     return prompt_complet
 
 
 def construire_resume_chapitre(titre, reponse):
     """
-    Construit un résumé TRÈS court d'un chapitre pour le contexte cumulatif.
-    CORRECTIF v6 : Réduit à 200 chars max par chapitre pour éviter que
-    le contexte cumulatif n'explose la taille du prompt et provoque des
-    boucles de répétition Gemini sur les chapitres 5-6.
+    v8.0 : Résumé FILTRÉ — exclut les lignes de formatage (tirets, Mermaid, séparateurs)
+    pour éviter de propager du bruit dans le contexte cumulatif.
+    Filtre également les nœuds et edges Mermaid du ch.2 pour éviter que le ch.3
+    les interprète comme une liste d'étapes et recopie le schéma comme workflow.
     """
-    resume = reponse[:200].replace("\n", " ").replace("|", " ").strip()
-    if len(reponse) > 200:
+    lignes_utiles = []
+    for ligne in reponse.split("\n"):
+        ligne = ligne.strip()
+        if not ligne:
+            continue
+        # Ignorer les séparateurs de tableau
+        if ligne.startswith("|") and "---" in ligne:
+            continue
+        # Ignorer le code Mermaid (balises + contenu)
+        if ligne.startswith("```"):
+            continue
+        if ligne.startswith("graph ") or ligne.startswith("subgraph"):
+            continue
+        # v8 : Ignorer les nœuds Mermaid — pattern : Mot["texte"] ou Mot("texte")
+        if re.match(r'^\w+[\[\(]["\'].*[\]\)]', ligne):
+            continue
+        # v8 : Ignorer les edges Mermaid — pattern : A --> B ou A -- "label" --> B
+        if " --> " in ligne or re.match(r".*\s+--\s+", ligne):
+            continue
+        # Ignorer les lignes quasi-vides (que des tirets/pipes)
+        contenu = (
+            ligne.replace("-", "").replace("|", "").replace(":", "").replace(" ", "")
+        )
+        if len(contenu) < 5 and len(ligne) > 10:
+            continue
+        lignes_utiles.append(ligne)
+        if len(" ".join(lignes_utiles)) > 300:
+            break
+
+    resume = " ".join(lignes_utiles)[:300]
+    if len(reponse) > 300:
         resume += "..."
-    return f"[{titre}] {resume}"
+    return f'<chapitre titre="{titre}">{resume}</chapitre>'
 
 
 # ==========================================================
@@ -1291,17 +1550,6 @@ CHAPITRES_TITRES = [
     "Chapitre 6 : Maintenabilité",
 ]
 
-PROMPT_INITIAL = (
-    f"INSTRUCTION CRITIQUE : Tu DOIS consulter les documents du RAG pour répondre. "
-    f"Utilise l'outil de recherche dans la base de connaissances.\n\n"
-    f"Tu es StarDoc, agent de documentation technique. "
-    f"J'ai déposé {len(noms_documents)} fichiers dans le RAG pour le dossier {NUM_DOSSIER} : "
-    f"{noms_documents_str}. "
-    f"Ces fichiers décrivent un projet citizen dev EDF. "
-    f"Confirme que tu as accès aux documents en listant ceux que tu retrouves dans le RAG "
-    f"avec un résumé de 1 phrase du contenu de chaque fichier."
-)
-
 # Init document Word
 doc_word = Document()
 doc_word.add_heading("Documentation Technique - StarDoc✨", level=0)
@@ -1318,59 +1566,158 @@ phrase_ia.alignment = 0
 log_separateur("PAUSE VECTORISATION RAG")
 log(f"Attente {PAUSE_VECTORISATION}s pour indexation des documents...")
 time.sleep(PAUSE_VECTORISATION)
-log("Fin de la pause initiale.")
+log("Fin de la pause de vectorisation.")
 
-# Vérification active (sans filtre _id, via listing complet)
-for verif_tentative in range(1, 4):
-    if verifier_indexation(ids_documents_rag):
-        break
-    if verif_tentative < 3:
-        log(
-            f"⏳ Attente supplémentaire de 30s (tentative {verif_tentative}/3)...",
-            "WARN",
-        )
-        time.sleep(30)
-    else:
-        log(
-            "⚠️  L'indexation n'est pas confirmée après 3 vérifications. On continue.",
-            "WARN",
-        )
-
-# Envoi du contexte initial
-log_separateur("ENVOI DU PROMPT INITIAL DE CONTEXTE")
-reponse_contexte = interroger_agent_sse(
-    PROMPT_INITIAL, titre_chapitre="CONTEXTE INITIAL"
+# ==========================================================
+# ÉTAPE 1.5 : TEST DE CONNECTIVITÉ (remplace PROMPT_INITIAL)
+# ==========================================================
+# Vérification légère : l'API répond-elle ?
+# Avantage vs PROMPT_INITIAL : instantané, ne consomme pas de quota LLM,
+# ne peut pas échouer silencieusement avec une réponse vide.
+log_separateur("TEST DE CONNECTIVITÉ API")
+test_response = requete_avec_retry(
+    "GET",
+    f"https://api.iag.edf.fr/v2/workspaces/HcA-puQ/webhooks/documents"
+    f"?projectId={PROJECT_ID}&limit=5",
+    headers=HEADERS,
 )
-
-if (
-    not reponse_contexte
-    or "InternalServerError" in reponse_contexte
-    or len(reponse_contexte) < 5
-):
-    msg = "ERREUR FATALE : Le contexte initial a echoue. Arret du script."
-    log(msg)
-    print(msg)
+if not test_response:
+    log("ERREUR FATALE : API inaccessible. Arrêt.", "ERROR")
     supprimer_documents(ids_documents_rag)
     sys.exit(1)
+log("✅ API accessible.")
 
-log(f"Contexte initial confirme ({len(reponse_contexte)} chars).")
-time.sleep(5)
+# ==========================================================
+# ÉTAPE 1.6 : PRÉ-ANALYSE RAG GLOBALE
+# ==========================================================
+# Remplace le PROMPT_INITIAL (qui échouait 2 fois sur 3 et dont la réponse
+# n'était jamais injectée dans les chapitres).
+# Ici : force une vraie lecture des fichiers par le RAG et injecte le résultat
+# dans contexte_cumule dès le départ — tous les chapitres en bénéficient.
+log_separateur("PRÉ-ANALYSE RAG GLOBALE")
+pre_analyse_query = (
+    f"Analyse les {len(noms_documents)} fichiers du dossier {NUM_DOSSIER} "
+    f"({noms_documents_str}). "
+    f"Pour chacun, indique en 1-2 phrases : son rôle dans le projet, "
+    f"les données clés qu'il contient (noms de variables, feuilles, étapes, "
+    f"macros, formules, écrans, actions...). "
+    f"Sois factuel et exhaustif, ne synthétise pas."
+)
+reponse_pre_analyse, _ = interroger_agent_sse(
+    pre_analyse_query, titre_chapitre="PRÉ-ANALYSE RAG GLOBALE"
+)
 
-# Génération des chapitres avec contexte cumulatif
-log_separateur("ÉTAPE 2 : GÉNÉRATION DES CHAPITRES")
+if not reponse_pre_analyse or len(reponse_pre_analyse) < 50:
+    log(
+        "⚠️  Pré-analyse vide — les chapitres partiront sans contexte RAG initial.",
+        "WARN",
+    )
+    reponse_pre_analyse = ""
+else:
+    log(f"✅ Pré-analyse RAG OK ({len(reponse_pre_analyse)} chars).")
+
+# Injecter dans contexte_cumule dès le départ
 contexte_cumule = ""
+if reponse_pre_analyse:
+    contexte_cumule = (
+        f'<pre_analyse titre="Inventaire RAG initial">'
+        f"{reponse_pre_analyse[:1500]}"
+        f"</pre_analyse>"
+    )
+    log(f"   Contexte initial chargé ({len(contexte_cumule)} chars).")
+
+time.sleep(3)
+
+# ==========================================================
+# ÉTAPE 2 : GÉNÉRATION DES CHAPITRES
+# ==========================================================
+log_separateur("ÉTAPE 2 : GÉNÉRATION DES CHAPITRES")
 
 for i, titre_chapitre in enumerate(CHAPITRES_TITRES, start=1):
     log(f"\n{'=' * 60}")
     log(f"CHAPITRE {i}/{len(CHAPITRES_TITRES)} : {titre_chapitre}")
     log(f"{'=' * 60}")
 
-    # CORRECTIF v5 : prompt enrichi avec structure complète + contexte cumulatif
-    prompt = construire_prompt_chapitre(
-        titre_chapitre, noms_documents_str, NUM_DOSSIER, contexte_cumule
-    )
+    reponse = None
+    search_results_chapitre = []
+    max_quality_retries = 3
 
-    reponse = interroger_agent_sse(prompt, titre_chapitre=titre_chapitre)
+    # ----------------------------------------------------------
+    # v8 : Pré-requête RAG dédiée avant le chapitre 3
+    # Force une extraction exhaustive des étapes/logique/macros
+    # avant que le modèle rédige, quelle que soit la techno du projet.
+    # ----------------------------------------------------------
+    pre_contexte_ch3 = ""
+    if titre_chapitre == "Chapitre 3 : Description étape par étape":
+        log("🔍 Pré-requête RAG dédiée ch.3 : extraction de la logique métier...")
+        pre_query_ch3 = (
+            f"Dans les fichiers du dossier {NUM_DOSSIER} ({noms_documents_str}), "
+            f"extrais et liste de façon exhaustive :\n"
+            f"1) Toutes les étapes/actions/séquences de traitement trouvées dans les "
+            f"fichiers sources (workflows, macros VBA, automatisations, formules, "
+            f"flux Power Automate, écrans Power Apps, séquences UiPath...). "
+            f"Pour chaque étape : son nom exact, ce qu'elle fait concrètement, "
+            f"l'outil ou le fichier impliqué.\n"
+            f"2) Les conditions (If, Switch, boucles ForEach) et points de branchement.\n"
+            f"3) Les fichiers ou systèmes lus et écrits à chaque étape.\n"
+            f"Sois exhaustif. Liste tout ce que tu trouves dans le RAG sans synthétiser."
+        )
+        pre_reponse_ch3, _ = interroger_agent_sse(
+            pre_query_ch3, titre_chapitre="PRÉ-QUERY CH3 RAG"
+        )
+        if pre_reponse_ch3 and len(pre_reponse_ch3) > 200:
+            pre_contexte_ch3 = (
+                f"\n<analyse_technique_rag>\n"
+                f"Données extraites du RAG pour ce chapitre :\n"
+                f"{pre_reponse_ch3[:3000]}\n"
+                f"</analyse_technique_rag>\n"
+            )
+            log(f"   ✅ Pré-analyse ch.3 injectée ({len(pre_contexte_ch3)} chars)")
+        else:
+            log("   ⚠️  Pré-analyse ch.3 vide ou trop courte", "WARN")
+        time.sleep(3)
+
+    for quality_attempt in range(1, max_quality_retries + 1):
+        prompt = construire_prompt_chapitre(
+            titre_chapitre,
+            noms_documents_str,
+            NUM_DOSSIER,
+            contexte_cumule,
+            pre_contexte_ch3,
+        )
+
+        # Si retry qualité, ajouter instruction corrective
+        if quality_attempt > 1:
+            prompt += (
+                "\n\n<correction>\n"
+                "ATTENTION : Ta réponse précédente était insuffisante. "
+                "Consulte à nouveau le RAG et produis un contenu plus détaillé. "
+                "Privilégie le texte en prose et les tableaux COURTS (max 15 lignes). "
+                "Utilise des séparateurs de tableau simples : |---|.\n"
+                "</correction>"
+            )
+
+        reponse, search_results_chapitre = interroger_agent_sse(
+            prompt, titre_chapitre=titre_chapitre
+        )
+
+        # v8 : validation qualité avec search_results
+        valide, raison = valider_qualite_chapitre(
+            titre_chapitre, reponse, search_results_chapitre
+        )
+        if valide:
+            log(
+                f"   ✅ Qualité validée (tentative {quality_attempt}/{max_quality_retries})"
+            )
+            break
+        else:
+            log(
+                f"   ⚠️  Qualité insuffisante (tentative {quality_attempt}/{max_quality_retries}): {raison}",
+                "WARN",
+            )
+            if quality_attempt < max_quality_retries:
+                log(f"   🔄 Retry qualité dans 15s...", "WARN")
+                time.sleep(15)
 
     print("\n" + "=" * 80)
     print(f"  {titre_chapitre}")
@@ -1383,7 +1730,7 @@ for i, titre_chapitre in enumerate(CHAPITRES_TITRES, start=1):
     doc_word.add_page_break()
     log(f"📘 {titre_chapitre} intégré au document Word.")
 
-    # CORRECTIF v5 : accumuler le contexte pour les chapitres suivants
+    # Résumé cumulatif filtré (nœuds/edges Mermaid exclus)
     resume = construire_resume_chapitre(titre_chapitre, reponse)
     contexte_cumule += f"\n{resume}"
 
