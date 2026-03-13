@@ -1380,7 +1380,12 @@ def construire_prompt_chapitre(
             "Commence directement par le contenu. Pas de titre de chapitre."
         ),
         "Chapitre 3 : Description étape par étape": (
-            "<tache>Génère le contenu COMPLET du Chapitre 3 : Description étape par étape. "
+            "<tache>Génère le contenu COMPLET du Chapitre 3...\n"
+            "INTERDIT : Ne déduis pas les étapes depuis le schéma Mermaid du chapitre 2. "
+            "Tu DOIS interroger le RAG pour lire les fichiers."
+            "Mode opératoire avant de rédiger. Le workflow doit comporter 15 à 25 étapes "
+            "granulaires reflétant la logique complète du projet (boucles, conditions, appels "
+            "de macros, gestion des fichiers). "
             "Ce chapitre comporte 4 sections obligatoires (ou 5 si UiPath détecté). "
             "Ne t'arrête pas après le tableau Workflow.</tache>\n"
             "<structure>\n"
