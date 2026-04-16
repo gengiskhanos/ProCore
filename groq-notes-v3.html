@@ -1,0 +1,1105 @@
+<!DOCTYPE html>
+<html lang="fr">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no">
+<title>GroqNotes</title>
+<link href="https://fonts.googleapis.com/css2?family=Syne:wght@400;600;700;800&family=JetBrains+Mono:wght@300;400;500&display=swap" rel="stylesheet">
+<style>
+*, *::before, *::after { box-sizing: border-box; margin: 0; padding: 0; }
+
+:root {
+  --bg: #080c14;
+  --surface: #0e1420;
+  --surface2: #141c2e;
+  --border: rgba(99,179,237,0.12);
+  --border2: rgba(99,179,237,0.22);
+  --cyan: #63b3ed;
+  --cyan-dim: rgba(99,179,237,0.15);
+  --cyan-glow: rgba(99,179,237,0.35);
+  --violet: #b794f4;
+  --violet-dim: rgba(183,148,244,0.12);
+  --green: #68d391;
+  --green-dim: rgba(104,211,145,0.12);
+  --orange: #f6ad55;
+  --red: #fc8181;
+  --text: #e2e8f0;
+  --text-muted: #718096;
+  --text-dim: #4a5568;
+  --radius: 14px;
+  --radius-sm: 8px;
+}
+
+html, body {
+  width: 100%; min-height: 100vh;
+  background: var(--bg);
+  color: var(--text);
+  font-family: 'JetBrains Mono', monospace;
+  font-size: 14px;
+  -webkit-tap-highlight-color: transparent;
+  overscroll-behavior: none;
+}
+
+/* Background grid */
+body::before {
+  content: '';
+  position: fixed; inset: 0; z-index: 0;
+  background-image:
+    linear-gradient(rgba(99,179,237,0.03) 1px, transparent 1px),
+    linear-gradient(90deg, rgba(99,179,237,0.03) 1px, transparent 1px);
+  background-size: 32px 32px;
+  pointer-events: none;
+}
+
+/* Orbs */
+body::after {
+  content: '';
+  position: fixed; inset: 0; z-index: 0;
+  background:
+    radial-gradient(ellipse 60% 40% at 20% 10%, rgba(99,179,237,0.08) 0%, transparent 70%),
+    radial-gradient(ellipse 50% 35% at 80% 85%, rgba(183,148,244,0.07) 0%, transparent 70%);
+  pointer-events: none;
+}
+
+.app { position: relative; z-index: 1; max-width: 480px; margin: 0 auto; padding: 0 0 100px; }
+
+/* ── HEADER ── */
+.header {
+  display: flex; align-items: center; justify-content: space-between;
+  padding: 20px 20px 0;
+}
+.logo {
+  font-family: 'Syne', sans-serif;
+  font-size: 20px; font-weight: 800;
+  letter-spacing: -0.5px;
+}
+.logo span { color: var(--cyan); }
+.logo small {
+  display: block;
+  font-size: 9px; font-weight: 400;
+  color: var(--text-muted);
+  letter-spacing: 2px; text-transform: uppercase;
+  margin-top: -2px;
+}
+.btn-settings {
+  width: 40px; height: 40px;
+  border: 1px solid var(--border);
+  border-radius: var(--radius-sm);
+  background: var(--surface);
+  color: var(--text-muted);
+  display: flex; align-items: center; justify-content: center;
+  cursor: pointer; transition: all 0.2s;
+  font-size: 18px;
+}
+.btn-settings:active { border-color: var(--cyan); color: var(--cyan); }
+
+/* ── STEP INDICATOR ── */
+.steps {
+  display: flex; align-items: center; gap: 6px;
+  padding: 20px 20px 0;
+}
+.step-dot {
+  width: 6px; height: 6px; border-radius: 50%;
+  background: var(--text-dim); transition: all 0.3s;
+}
+.step-dot.active { background: var(--cyan); box-shadow: 0 0 8px var(--cyan-glow); width: 20px; border-radius: 3px; }
+.step-dot.done { background: var(--green); }
+.step-label {
+  margin-left: 8px;
+  font-size: 11px; color: var(--text-muted);
+  letter-spacing: 1px; text-transform: uppercase;
+}
+
+/* ── SECTION ── */
+.section {
+  margin: 16px 16px 0;
+  background: var(--surface);
+  border: 1px solid var(--border);
+  border-radius: var(--radius);
+  overflow: hidden;
+}
+.section-header {
+  display: flex; align-items: center; gap: 10px;
+  padding: 14px 16px;
+  border-bottom: 1px solid var(--border);
+}
+.section-icon {
+  width: 28px; height: 28px;
+  border-radius: 6px;
+  display: flex; align-items: center; justify-content: center;
+  font-size: 14px;
+  flex-shrink: 0;
+}
+.icon-blue { background: var(--cyan-dim); }
+.icon-violet { background: var(--violet-dim); }
+.icon-green { background: var(--green-dim); }
+.section-title {
+  font-family: 'Syne', sans-serif;
+  font-size: 13px; font-weight: 700;
+  color: var(--text);
+  letter-spacing: 0.3px;
+}
+.section-subtitle { font-size: 10px; color: var(--text-muted); margin-top: 1px; }
+
+/* ── FILE PICKER ── */
+.file-zone {
+  padding: 24px 16px;
+  display: flex; flex-direction: column; align-items: center; gap: 12px;
+  cursor: pointer;
+  transition: background 0.2s;
+}
+.file-zone:active { background: var(--cyan-dim); }
+
+#fileInput { display: none; }
+
+.file-icon-wrap {
+  width: 64px; height: 64px;
+  border-radius: 16px;
+  border: 1.5px dashed var(--border2);
+  background: var(--surface2);
+  display: flex; align-items: center; justify-content: center;
+  font-size: 28px;
+  transition: all 0.3s;
+}
+.file-zone:active .file-icon-wrap {
+  border-color: var(--cyan);
+  box-shadow: 0 0 20px var(--cyan-glow);
+}
+.file-hint { font-size: 12px; color: var(--text-muted); text-align: center; }
+.file-hint strong { color: var(--cyan); display: block; margin-bottom: 2px; font-size: 13px; }
+
+.file-selected {
+  display: none;
+  padding: 14px 16px;
+  gap: 12px;
+  align-items: center;
+}
+.file-selected.visible { display: flex; }
+.file-thumb {
+  width: 44px; height: 44px; border-radius: 10px;
+  background: var(--cyan-dim);
+  border: 1px solid var(--border2);
+  display: flex; align-items: center; justify-content: center;
+  font-size: 20px; flex-shrink: 0;
+}
+.file-info { flex: 1; min-width: 0; }
+.file-name {
+  font-size: 13px; font-weight: 500; color: var(--text);
+  white-space: nowrap; overflow: hidden; text-overflow: ellipsis;
+}
+.file-meta { font-size: 10px; color: var(--text-muted); margin-top: 2px; }
+.btn-clear {
+  width: 28px; height: 28px;
+  border-radius: 6px; border: 1px solid var(--border);
+  background: transparent; color: var(--text-muted);
+  font-size: 14px; cursor: pointer;
+  display: flex; align-items: center; justify-content: center;
+  transition: all 0.2s;
+}
+.btn-clear:active { border-color: var(--red); color: var(--red); }
+
+/* ── NOTE TYPE SELECTOR ── */
+.note-types {
+  padding: 12px;
+  display: grid; grid-template-columns: 1fr 1fr;
+  gap: 8px;
+}
+.note-type {
+  padding: 12px;
+  border-radius: var(--radius-sm);
+  border: 1.5px solid var(--border);
+  background: var(--surface2);
+  cursor: pointer;
+  transition: all 0.2s;
+  display: flex; flex-direction: column; gap: 4px;
+  -webkit-tap-highlight-color: transparent;
+}
+.note-type.selected {
+  border-color: var(--cyan);
+  background: var(--cyan-dim);
+  box-shadow: 0 0 12px rgba(99,179,237,0.15);
+}
+.note-type-icon { font-size: 18px; }
+.note-type-label {
+  font-family: 'Syne', sans-serif;
+  font-size: 11px; font-weight: 700;
+  color: var(--text);
+  line-height: 1.2;
+}
+.note-type-desc { font-size: 9px; color: var(--text-muted); line-height: 1.3; }
+.note-type.selected .note-type-label { color: var(--cyan); }
+
+/* ── LANGUAGE SELECTOR ── */
+.lang-row {
+  padding: 12px 16px;
+  display: flex; gap: 8px;
+}
+.lang-btn {
+  flex: 1; padding: 8px;
+  border-radius: var(--radius-sm);
+  border: 1.5px solid var(--border);
+  background: var(--surface2);
+  color: var(--text-muted);
+  font-family: 'Syne', sans-serif;
+  font-size: 12px; font-weight: 700;
+  cursor: pointer; transition: all 0.2s;
+  text-align: center;
+}
+.lang-btn.selected {
+  border-color: var(--violet);
+  background: var(--violet-dim);
+  color: var(--violet);
+}
+
+/* ── PROCESS BUTTON ── */
+.btn-process-wrap { padding: 16px; }
+.btn-process {
+  width: 100%;
+  padding: 16px;
+  border-radius: var(--radius);
+  border: none;
+  background: linear-gradient(135deg, var(--cyan) 0%, var(--violet) 100%);
+  color: #080c14;
+  font-family: 'Syne', sans-serif;
+  font-size: 14px; font-weight: 800;
+  letter-spacing: 0.5px;
+  cursor: pointer;
+  transition: all 0.2s;
+  display: flex; align-items: center; justify-content: center; gap: 8px;
+  position: relative; overflow: hidden;
+}
+.btn-process:disabled {
+  background: var(--surface2);
+  color: var(--text-dim);
+  border: 1px solid var(--border);
+  cursor: not-allowed;
+}
+.btn-process:not(:disabled):active {
+  transform: scale(0.98);
+  box-shadow: 0 0 30px var(--cyan-glow);
+}
+.btn-process .shine {
+  position: absolute; inset: 0;
+  background: linear-gradient(105deg, transparent 40%, rgba(255,255,255,0.15) 50%, transparent 60%);
+  transform: translateX(-100%);
+  animation: shine 2.5s infinite;
+}
+@keyframes shine { to { transform: translateX(200%); } }
+
+/* ── PROGRESS ── */
+.progress-wrap {
+  display: none;
+  padding: 16px;
+  flex-direction: column; gap: 10px;
+}
+.progress-wrap.visible { display: flex; }
+.progress-step {
+  display: flex; align-items: center; gap: 10px;
+  padding: 10px 12px;
+  border-radius: var(--radius-sm);
+  background: var(--surface2);
+  border: 1px solid var(--border);
+  transition: all 0.3s;
+}
+.progress-step.active {
+  border-color: var(--cyan);
+  background: var(--cyan-dim);
+}
+.progress-step.done {
+  border-color: var(--green);
+  background: var(--green-dim);
+}
+.progress-step.error-step {
+  border-color: var(--red);
+  background: rgba(252,129,129,0.08);
+}
+.progress-indicator {
+  width: 20px; height: 20px; flex-shrink: 0;
+  display: flex; align-items: center; justify-content: center;
+  font-size: 13px;
+}
+.spinner {
+  width: 16px; height: 16px;
+  border: 2px solid var(--cyan-dim);
+  border-top-color: var(--cyan);
+  border-radius: 50%;
+  animation: spin 0.7s linear infinite;
+}
+@keyframes spin { to { transform: rotate(360deg); } }
+.progress-text {
+  font-size: 12px; color: var(--text-muted); flex: 1;
+}
+.progress-step.active .progress-text { color: var(--cyan); }
+.progress-step.done .progress-text { color: var(--green); }
+
+/* ── RESULTS ── */
+.results-wrap {
+  display: none;
+  flex-direction: column; gap: 12px;
+  padding: 0 16px;
+}
+.results-wrap.visible { display: flex; }
+
+.result-card {
+  background: var(--surface);
+  border: 1px solid var(--border);
+  border-radius: var(--radius);
+  overflow: hidden;
+  animation: slideUp 0.4s ease both;
+}
+@keyframes slideUp {
+  from { opacity: 0; transform: translateY(16px); }
+  to { opacity: 1; transform: translateY(0); }
+}
+.result-card:nth-child(1) { animation-delay: 0s; }
+.result-card:nth-child(2) { animation-delay: 0.08s; }
+.result-card:nth-child(3) { animation-delay: 0.16s; }
+.result-card:nth-child(4) { animation-delay: 0.24s; }
+
+.result-card-header {
+  display: flex; align-items: center; justify-content: space-between;
+  padding: 12px 14px;
+  border-bottom: 1px solid var(--border);
+}
+.result-card-title {
+  display: flex; align-items: center; gap: 8px;
+  font-family: 'Syne', sans-serif;
+  font-size: 12px; font-weight: 700;
+  color: var(--text);
+}
+.result-card-title .dot {
+  width: 6px; height: 6px; border-radius: 50%;
+}
+.dot-cyan { background: var(--cyan); box-shadow: 0 0 6px var(--cyan); }
+.dot-violet { background: var(--violet); box-shadow: 0 0 6px var(--violet); }
+.dot-green { background: var(--green); box-shadow: 0 0 6px var(--green); }
+.dot-orange { background: var(--orange); box-shadow: 0 0 6px var(--orange); }
+.dot-blue { background: #76e4f7; box-shadow: 0 0 6px #76e4f7; }
+
+.btn-copy-card {
+  padding: 4px 10px;
+  border-radius: 4px; border: 1px solid var(--border);
+  background: transparent; color: var(--text-muted);
+  font-size: 10px; cursor: pointer; transition: all 0.2s;
+  font-family: 'JetBrains Mono', monospace;
+}
+.btn-copy-card:active { border-color: var(--cyan); color: var(--cyan); }
+
+.result-body { padding: 14px; }
+.result-text {
+  font-size: 13px; color: var(--text);
+  line-height: 1.7; white-space: pre-wrap;
+}
+.result-list { list-style: none; display: flex; flex-direction: column; gap: 8px; }
+.result-list li {
+  display: flex; align-items: flex-start; gap: 8px;
+  font-size: 13px; color: var(--text); line-height: 1.5;
+}
+.result-list li::before {
+  content: '▸';
+  color: var(--cyan); flex-shrink: 0; margin-top: 1px;
+  font-size: 11px;
+}
+.todo-item {
+  display: flex; align-items: flex-start; gap: 10px;
+  padding: 8px 10px;
+  border-radius: 6px;
+  background: var(--surface2);
+  border: 1px solid var(--border);
+  cursor: pointer; transition: all 0.2s;
+  font-size: 13px; color: var(--text); line-height: 1.5;
+}
+.todo-item.checked { opacity: 0.5; }
+.todo-item.checked span { text-decoration: line-through; }
+.todo-check {
+  width: 16px; height: 16px; border-radius: 4px;
+  border: 1.5px solid var(--border2);
+  background: transparent; flex-shrink: 0;
+  display: flex; align-items: center; justify-content: center;
+  font-size: 10px; margin-top: 1px;
+  transition: all 0.2s;
+}
+.todo-item.checked .todo-check {
+  background: var(--green); border-color: var(--green); color: #080c14;
+}
+
+/* ── COPY ALL BUTTON ── */
+.btn-copy-all {
+  width: 100%;
+  padding: 14px;
+  border-radius: var(--radius);
+  border: 1px solid var(--border2);
+  background: transparent;
+  color: var(--cyan);
+  font-family: 'Syne', sans-serif;
+  font-size: 13px; font-weight: 700;
+  cursor: pointer; transition: all 0.2s;
+  display: flex; align-items: center; justify-content: center; gap: 6px;
+}
+.btn-copy-all:active { background: var(--cyan-dim); }
+
+.btn-reset {
+  width: 100%;
+  padding: 12px;
+  border-radius: var(--radius);
+  border: 1px solid var(--border);
+  background: transparent;
+  color: var(--text-muted);
+  font-family: 'Syne', sans-serif;
+  font-size: 12px; font-weight: 700;
+  cursor: pointer; transition: all 0.2s;
+}
+.btn-reset:active { color: var(--text); }
+
+/* ── ERROR ── */
+.error-msg {
+  display: none;
+  margin: 0 16px;
+  padding: 12px 14px;
+  border-radius: var(--radius-sm);
+  border: 1px solid var(--red);
+  background: rgba(252,129,129,0.08);
+  color: var(--red);
+  font-size: 12px; line-height: 1.5;
+}
+.error-msg.visible { display: block; }
+
+/* ── SETTINGS PANEL ── */
+.settings-overlay {
+  display: none;
+  position: fixed; inset: 0; z-index: 50;
+  background: rgba(8,12,20,0.85);
+  backdrop-filter: blur(8px);
+  align-items: flex-end;
+}
+.settings-overlay.visible { display: flex; }
+.settings-panel {
+  width: 100%;
+  max-width: 480px; margin: 0 auto;
+  background: var(--surface);
+  border: 1px solid var(--border2);
+  border-bottom: none;
+  border-radius: 20px 20px 0 0;
+  padding: 20px;
+  animation: slidePanel 0.3s ease;
+}
+@keyframes slidePanel {
+  from { transform: translateY(100%); }
+  to { transform: translateY(0); }
+}
+.settings-handle {
+  width: 36px; height: 4px;
+  border-radius: 2px; background: var(--text-dim);
+  margin: 0 auto 20px;
+}
+.settings-title {
+  font-family: 'Syne', sans-serif;
+  font-size: 16px; font-weight: 800;
+  margin-bottom: 16px;
+}
+.settings-label {
+  font-size: 10px; color: var(--text-muted);
+  text-transform: uppercase; letter-spacing: 1.5px;
+  margin-bottom: 6px; display: block;
+}
+.settings-input {
+  width: 100%;
+  padding: 12px 14px;
+  border-radius: var(--radius-sm);
+  border: 1px solid var(--border);
+  background: var(--surface2);
+  color: var(--text);
+  font-family: 'JetBrains Mono', monospace;
+  font-size: 13px;
+  outline: none; transition: border-color 0.2s;
+  margin-bottom: 16px;
+}
+.settings-input:focus { border-color: var(--cyan); }
+.settings-hint {
+  font-size: 11px; color: var(--text-muted);
+  line-height: 1.5; margin-bottom: 20px;
+}
+.settings-hint a { color: var(--cyan); text-decoration: none; }
+.btn-save-settings {
+  width: 100%;
+  padding: 14px;
+  border-radius: var(--radius);
+  border: none;
+  background: var(--cyan);
+  color: #080c14;
+  font-family: 'Syne', sans-serif;
+  font-size: 14px; font-weight: 800;
+  cursor: pointer;
+}
+.btn-save-settings:active { opacity: 0.85; }
+
+/* ── TOAST ── */
+.toast {
+  position: fixed; bottom: 20px; left: 50%; transform: translateX(-50%) translateY(80px);
+  background: var(--surface2); border: 1px solid var(--border2);
+  color: var(--text); font-size: 12px;
+  padding: 10px 18px; border-radius: 20px;
+  transition: transform 0.3s ease; z-index: 99;
+  white-space: nowrap;
+}
+.toast.show { transform: translateX(-50%) translateY(0); }
+</style>
+</head>
+<body>
+
+<div class="app">
+  <!-- Header -->
+  <div class="header">
+    <div class="logo">
+      Groq<span>Notes</span>
+      <small>Audio → Intelligence</small>
+    </div>
+    <button class="btn-settings" onclick="openSettings()">⚙️</button>
+  </div>
+
+  <!-- Steps -->
+  <div class="steps">
+    <div class="step-dot active" id="dot0"></div>
+    <div class="step-dot" id="dot1"></div>
+    <div class="step-dot" id="dot2"></div>
+    <div class="step-label" id="stepLabel">Sélectionner un fichier</div>
+  </div>
+
+  <!-- Step 1: File -->
+  <div class="section" id="sectionFile">
+    <div class="section-header">
+      <div class="section-icon icon-blue">🎵</div>
+      <div>
+        <div class="section-title">Fichier audio</div>
+        <div class="section-subtitle">mp3, m4a, wav, ogg, webm · max 25 MB</div>
+      </div>
+    </div>
+
+    <div class="file-zone" id="fileZone" onclick="document.getElementById('fileInput').click()">
+      <input type="file" id="fileInput" accept="audio/*,.mp3,.m4a,.wav,.ogg,.webm,.flac,.aac" onchange="onFileSelected(this)">
+      <div class="file-icon-wrap">🎙️</div>
+      <div class="file-hint">
+        <strong>Appuyer pour sélectionner</strong>
+        Enregistrement de réunion, présentation, podcast…
+      </div>
+    </div>
+
+    <div class="file-selected" id="fileSelected">
+      <div class="file-thumb">🎵</div>
+      <div class="file-info">
+        <div class="file-name" id="fileName">—</div>
+        <div class="file-meta" id="fileMeta">—</div>
+      </div>
+      <button class="btn-clear" onclick="clearFile()">✕</button>
+    </div>
+  </div>
+
+  <!-- Step 2: Note type -->
+  <div class="section" id="sectionType">
+    <div class="section-header">
+      <div class="section-icon icon-violet">✨</div>
+      <div>
+        <div class="section-title">Type de notes</div>
+        <div class="section-subtitle">Choisir un mode d'analyse</div>
+      </div>
+    </div>
+    <div class="note-types">
+      <div class="note-type selected" data-type="synthetic" onclick="selectType(this)" style="grid-column: span 2;">
+        <div class="note-type-icon">📋</div>
+        <div class="note-type-label">Résumé synthétique</div>
+        <div class="note-type-desc">Vue d'ensemble concise, parties bien séparées</div>
+      </div>
+      <div class="note-type" data-type="detailed" onclick="selectType(this)" style="grid-column: span 2;">
+        <div class="note-type-icon">📑</div>
+        <div class="note-type-label">Résumé détaillé</div>
+        <div class="note-type-desc">Analyse approfondie, parties bien séparées</div>
+      </div>
+      <div class="note-type" data-type="bullets" onclick="selectType(this)">
+        <div class="note-type-icon">💡</div>
+        <div class="note-type-label">Bullet points</div>
+        <div class="note-type-desc">Points clés essentiels</div>
+      </div>
+      <div class="note-type" data-type="todos" onclick="selectType(this)">
+        <div class="note-type-icon">✅</div>
+        <div class="note-type-label">To-do list</div>
+        <div class="note-type-desc">Actions identifiées</div>
+      </div>
+      <div class="note-type" data-type="transcript" onclick="selectType(this)" style="grid-column: span 2;">
+        <div class="note-type-icon">📝</div>
+        <div class="note-type-label">Transcription brute</div>
+        <div class="note-type-desc">Texte intégral sans traitement</div>
+      </div>
+    </div>
+
+    <!-- Language -->
+    <div style="padding: 0 12px 4px; font-size: 10px; color: var(--text-muted); text-transform: uppercase; letter-spacing: 1.5px;">Langue</div>
+    <div class="lang-row">
+      <button class="lang-btn selected" data-lang="fr" onclick="selectLang(this)">🇫🇷 Français</button>
+      <button class="lang-btn" data-lang="en" onclick="selectLang(this)">🇬🇧 English</button>
+      <button class="lang-btn" data-lang="auto" onclick="selectLang(this)">🌐 Auto</button>
+    </div>
+  </div>
+
+  <!-- Process button -->
+  <div class="btn-process-wrap">
+    <button class="btn-process" id="btnProcess" disabled onclick="processAudio()">
+      <div class="shine"></div>
+      <span>🚀</span> <span id="btnProcessLabel">Analyser l'audio</span>
+    </button>
+  </div>
+
+  <!-- Error -->
+  <div class="error-msg" id="errorMsg"></div>
+
+  <!-- Progress -->
+  <div class="progress-wrap" id="progressWrap">
+    <div class="progress-step" id="pStep1">
+      <div class="progress-indicator" id="pInd1">⬜</div>
+      <div class="progress-text" id="pTxt1">Envoi à Groq Whisper…</div>
+    </div>
+    <div class="progress-step" id="pStep2">
+      <div class="progress-indicator" id="pInd2">⬜</div>
+      <div class="progress-text" id="pTxt2">Transcription en cours…</div>
+    </div>
+    <div class="progress-step" id="pStep3">
+      <div class="progress-indicator" id="pInd3">⬜</div>
+      <div class="progress-text" id="pTxt3">Analyse IA (Llama 3.3)…</div>
+    </div>
+  </div>
+
+  <!-- Results -->
+  <div class="results-wrap" id="resultsWrap"></div>
+
+  <!-- Bottom actions -->
+  <div id="bottomActions" style="display:none; padding: 0 16px; flex-direction: column; gap: 8px;">
+    <button class="btn-copy-all" id="btnCopyTranscript" onclick="copyTranscript(this)" style="border-color: rgba(183,148,244,0.35); color: var(--violet);">📝 Copier la transcription</button>
+    <button class="btn-reset" onclick="resetAll()">↩ Nouvelle analyse</button>
+  </div>
+</div>
+
+<!-- Settings Panel -->
+<div class="settings-overlay" id="settingsOverlay" onclick="closeSettingsIfOutside(event)">
+  <div class="settings-panel">
+    <div class="settings-handle"></div>
+    <div class="settings-title">⚙️ Paramètres</div>
+    <label class="settings-label">Clé API Groq</label>
+    <input type="password" class="settings-input" id="apiKeyInput" placeholder="gsk_…" autocomplete="off">
+    <div class="settings-hint">
+      Gratuit sur <a href="https://console.groq.com" target="_blank">console.groq.com</a><br>
+      La clé est stockée localement sur ton appareil et jamais transmise ailleurs qu'à Groq.
+    </div>
+    <button class="btn-save-settings" onclick="saveSettings()">Enregistrer</button>
+  </div>
+</div>
+
+<!-- Toast -->
+<div class="toast" id="toast"></div>
+
+<script>
+// ── STATE ──
+let selectedFile = null;
+let selectedType = 'synthetic';
+let selectedLang = 'fr';
+let lastResults = {};
+
+// ── INIT ──
+window.addEventListener('load', () => {
+  const key = localStorage.getItem('groq_api_key');
+  if (key) document.getElementById('apiKeyInput').value = key;
+  if (!key) openSettings();
+  updateProcessBtn();
+});
+
+// ── FILE ──
+function onFileSelected(input) {
+  const file = input.files[0];
+  if (!file) return;
+  if (file.size > 25 * 1024 * 1024) {
+    showError('Fichier trop volumineux (max 25 MB). Découpe-le en parties plus courtes.');
+    return;
+  }
+  selectedFile = file;
+  document.getElementById('fileZone').style.display = 'none';
+  const sel = document.getElementById('fileSelected');
+  sel.classList.add('visible');
+  document.getElementById('fileName').textContent = file.name;
+  document.getElementById('fileMeta').textContent = formatSize(file.size) + ' · ' + file.type.split('/')[1]?.toUpperCase() || 'AUDIO';
+  updateProcessBtn();
+  hideError();
+}
+
+function clearFile() {
+  selectedFile = null;
+  document.getElementById('fileInput').value = '';
+  document.getElementById('fileZone').style.display = 'flex';
+  document.getElementById('fileSelected').classList.remove('visible');
+  updateProcessBtn();
+}
+
+function formatSize(bytes) {
+  if (bytes < 1024 * 1024) return (bytes / 1024).toFixed(1) + ' KB';
+  return (bytes / 1024 / 1024).toFixed(1) + ' MB';
+}
+
+// ── TYPE & LANG ──
+function selectType(el) {
+  document.querySelectorAll('.note-type').forEach(e => e.classList.remove('selected'));
+  el.classList.add('selected');
+  selectedType = el.dataset.type;
+}
+
+function selectLang(el) {
+  document.querySelectorAll('.lang-btn').forEach(e => e.classList.remove('selected'));
+  el.classList.add('selected');
+  selectedLang = el.dataset.lang;
+}
+
+// ── SETTINGS ──
+function openSettings() {
+  document.getElementById('settingsOverlay').classList.add('visible');
+}
+function closeSettingsIfOutside(e) {
+  if (e.target === document.getElementById('settingsOverlay'))
+    document.getElementById('settingsOverlay').classList.remove('visible');
+}
+function saveSettings() {
+  const key = document.getElementById('apiKeyInput').value.trim();
+  if (!key.startsWith('gsk_')) { showToast('⚠️ Clé invalide (doit commencer par gsk_)'); return; }
+  localStorage.setItem('groq_api_key', key);
+  document.getElementById('settingsOverlay').classList.remove('visible');
+  showToast('✅ Clé sauvegardée');
+  updateProcessBtn();
+}
+
+function updateProcessBtn() {
+  const key = localStorage.getItem('groq_api_key');
+  const btn = document.getElementById('btnProcess');
+  btn.disabled = !(selectedFile && key);
+}
+
+// ── PROCESS ──
+async function processAudio() {
+  const apiKey = localStorage.getItem('groq_api_key');
+  if (!apiKey || !selectedFile) return;
+
+  hideError();
+  document.getElementById('btnProcess').disabled = true;
+  document.getElementById('resultsWrap').classList.remove('visible');
+  document.getElementById('resultsWrap').innerHTML = '';
+  document.getElementById('bottomActions').style.display = 'none';
+  lastResults = {};
+
+  // Show progress
+  const progressWrap = document.getElementById('progressWrap');
+  progressWrap.classList.add('visible');
+  setStep(1, 'active', 'Envoi à Groq Whisper…');
+  setStep(2, 'idle', 'En attente…');
+  setStep(3, 'idle', 'En attente…');
+
+  updateStepDots(1);
+
+  try {
+    // ── STEP 1+2: Transcription via Groq Whisper ──
+    setStep(1, 'active', 'Envoi du fichier audio…');
+    const formData = new FormData();
+    formData.append('file', selectedFile, selectedFile.name);
+    formData.append('model', 'whisper-large-v3');
+    if (selectedLang !== 'auto') formData.append('language', selectedLang);
+    formData.append('response_format', 'json');
+
+    const transcriptRes = await fetch('https://api.groq.com/openai/v1/audio/transcriptions', {
+      method: 'POST',
+      headers: { 'Authorization': `Bearer ${apiKey}` },
+      body: formData
+    });
+
+    if (!transcriptRes.ok) {
+      const err = await transcriptRes.json().catch(() => ({}));
+      throw new Error(err?.error?.message || `Erreur Groq Whisper (${transcriptRes.status})`);
+    }
+
+    setStep(1, 'done', 'Audio envoyé ✓');
+    setStep(2, 'active', 'Transcription reçue…');
+
+    const transcriptData = await transcriptRes.json();
+    const transcript = transcriptData.text?.trim();
+    if (!transcript) throw new Error('Transcription vide — vérifie que le fichier contient de la parole.');
+
+    lastResults.transcript = transcript;
+    setStep(2, 'done', `Transcription terminée (${transcript.split(' ').length} mots) ✓`);
+
+    // ── STEP 3: Analysis via Groq LLM ──
+    if (selectedType !== 'transcript') {
+      setStep(3, 'active', 'Analyse IA en cours…');
+      updateStepDots(2);
+
+      const prompt = buildPrompt(transcript, selectedType, selectedLang);
+
+      const llmRes = await fetch('https://api.groq.com/openai/v1/chat/completions', {
+        method: 'POST',
+        headers: {
+          'Authorization': `Bearer ${apiKey}`,
+          'Content-Type': 'application/json'
+        },
+        body: JSON.stringify({
+          model: 'llama-3.3-70b-versatile',
+          temperature: 0.3,
+          max_tokens: 1500,
+          messages: [
+            { role: 'system', content: systemPrompt(selectedLang) },
+            { role: 'user', content: prompt }
+          ]
+        })
+      });
+
+      if (!llmRes.ok) {
+        const err = await llmRes.json().catch(() => ({}));
+        throw new Error(err?.error?.message || `Erreur Groq LLM (${llmRes.status})`);
+      }
+
+      const llmData = await llmRes.json();
+      const raw = llmData.choices?.[0]?.message?.content || '';
+
+      try {
+        const parsed = JSON.parse(raw.replace(/```json|```/g, '').trim());
+        lastResults.analysis = parsed;
+      } catch {
+        lastResults.analysis = { raw };
+      }
+
+      setStep(3, 'done', 'Analyse terminée ✓');
+    } else {
+      setStep(3, 'done', 'Mode transcription — pas d\'analyse LLM');
+    }
+
+    updateStepDots(3);
+    renderResults();
+
+  } catch (err) {
+    showError(err.message || 'Erreur inattendue. Vérifie ta clé API et ta connexion.');
+    setStep(1, 'error-step', ''); setStep(2, 'error-step', ''); setStep(3, 'error-step', '');
+    document.getElementById('btnProcess').disabled = false;
+  }
+}
+
+function systemPrompt(lang) {
+  if (lang === 'en') return 'You are an expert note-taking AI. Always respond with valid JSON only, no markdown, no preamble.';
+  return 'Tu es un assistant expert en prise de notes. Réponds toujours en JSON valide uniquement, sans markdown, sans préambule.';
+}
+
+function buildPrompt(transcript, type, lang) {
+  const isEn = lang === 'en';
+  const base = isEn
+    ? `Here is an audio transcript:\n\n"${transcript}"\n\n`
+    : `Voici la transcription d'un audio :\n\n"${transcript}"\n\n`;
+
+  const prompts = {
+    synthetic: base + (isEn
+      ? 'Generate a concise synthetic summary with clearly separated sections. Return JSON: {"title": "...", "sections": [{"heading": "...", "content": "..."}]}'
+      : 'Génère un résumé synthétique concis avec des parties bien séparées. Retourne du JSON : {"title": "...", "sections": [{"heading": "...", "content": "..."}]}'),
+    detailed: base + (isEn
+      ? 'Generate a detailed in-depth summary with clearly separated sections, each section being thorough and complete. Return JSON: {"title": "...", "sections": [{"heading": "...", "content": "..."}]}'
+      : 'Génère un résumé détaillé et approfondi avec des parties bien séparées, chaque partie étant complète et développée. Retourne du JSON : {"title": "...", "sections": [{"heading": "...", "content": "..."}]}'),
+    bullets: base + (isEn
+      ? 'Extract all key points as bullet points. Return JSON: {"title": "...", "bullets": ["point 1", "point 2", ...]}'
+      : 'Extrais tous les points clés sous forme de bullet points. Retourne du JSON : {"title": "...", "bullets": ["point 1", "point 2", ...]}'),
+    todos: base + (isEn
+      ? 'Identify all action items and tasks mentioned. Return JSON: {"title": "...", "todos": ["task 1", "task 2", ...]}'
+      : 'Identifie toutes les actions et tâches mentionnées. Retourne du JSON : {"title": "...", "todos": ["tâche 1", "tâche 2", ...]}'),
+  };
+  return prompts[type] || prompts.synthetic;
+}
+
+// ── RENDER ──
+function renderResults() {
+  const wrap = document.getElementById('resultsWrap');
+  wrap.innerHTML = '';
+  wrap.classList.add('visible');
+
+  const a = lastResults.analysis || {};
+
+  if (selectedType === 'transcript') {
+    // Transcription only mode - no analysis card header needed
+    const card = makeSectionCard('📝 Transcription brute', 'dot-cyan', 'text', lastResults.transcript);
+    wrap.appendChild(card);
+  } else {
+    // Title banner
+    if (a.title) {
+      const banner = document.createElement('div');
+      banner.style.cssText = 'padding: 8px 2px 10px; font-family: Syne, sans-serif; font-size: 15px; font-weight: 800; color: var(--cyan);';
+      banner.textContent = a.title;
+      wrap.appendChild(banner);
+    }
+
+    if (selectedType === 'synthetic' || selectedType === 'detailed') {
+      if (a.sections?.length) {
+        a.sections.forEach((s, i) => {
+          wrap.appendChild(makeSectionCard(s.heading, i % 2 === 0 ? 'dot-cyan' : 'dot-violet', 'text', s.content));
+        });
+      }
+    } else if (selectedType === 'bullets') {
+      if (a.bullets?.length) wrap.appendChild(makeSectionCard('💡 Points clés', 'dot-cyan', 'bullets', a.bullets));
+    } else if (selectedType === 'todos') {
+      if (a.todos?.length) wrap.appendChild(makeSectionCard('✅ Actions à faire', 'dot-green', 'todos', a.todos));
+    }
+
+    if (a.raw) wrap.appendChild(makeSectionCard('📄 Résultat brut', 'dot-cyan', 'text', a.raw));
+
+    // Copy summary button before transcript
+    if (lastResults.transcript) {
+      const copyBtn = document.createElement('button');
+      copyBtn.className = 'btn-copy-all';
+      copyBtn.innerHTML = '📋 Copier le résumé';
+      copyBtn.onclick = function() { copySummary(this); };
+      wrap.appendChild(copyBtn);
+
+      const divider = document.createElement('div');
+      divider.style.cssText = 'height: 1px; background: var(--border); margin: 4px 0;';
+      wrap.appendChild(divider);
+      wrap.appendChild(makeSectionCard('📝 Transcription brute', 'dot-violet', 'text', lastResults.transcript));
+    }
+  }
+
+  const bottomActions = document.getElementById('bottomActions');
+  bottomActions.style.display = 'flex';
+
+  wrap.scrollIntoView({ behavior: 'smooth', block: 'start' });
+}
+
+function makeSectionCard(title, dotClass, contentType, content) {
+  const card = document.createElement('div');
+  card.className = 'result-card';
+
+  card.innerHTML = `
+    <div class="result-card-header">
+      <div class="result-card-title">
+        <div class="dot ${dotClass}"></div> ${title}
+      </div>
+    </div>
+    <div class="result-body"></div>
+  `;
+
+  const body = card.querySelector('.result-body');
+
+  if (contentType === 'text') {
+    const p = document.createElement('div');
+    p.className = 'result-text';
+    p.textContent = content;
+    body.appendChild(p);
+  } else if (contentType === 'bullets') {
+    const ul = document.createElement('ul');
+    ul.className = 'result-list';
+    content.forEach(item => {
+      const li = document.createElement('li');
+      li.textContent = item;
+      ul.appendChild(li);
+    });
+    body.appendChild(ul);
+  } else if (contentType === 'todos') {
+    content.forEach(item => {
+      const div = document.createElement('div');
+      div.className = 'todo-item';
+      div.innerHTML = `<div class="todo-check"></div><span>${escHTML(item)}</span>`;
+      div.onclick = () => div.classList.toggle('checked');
+      body.appendChild(div);
+    });
+  }
+
+  return card;
+}
+
+// ── COPY ──
+
+function copySummary(btn) {
+  const lines = [];
+  const a = lastResults.analysis || {};
+
+  if (selectedType === 'transcript') {
+    lines.push(lastResults.transcript || '');
+  } else {
+    if (a.title) lines.push(`# ${a.title}\n`);
+    if ((selectedType === 'synthetic' || selectedType === 'detailed') && a.sections?.length) {
+      a.sections.forEach(s => lines.push(`## ${s.heading}\n${s.content}`));
+    } else if (selectedType === 'bullets' && a.bullets?.length) {
+      lines.push(`## Points clés\n${a.bullets.map(x => '• ' + x).join('\n')}`);
+    } else if (selectedType === 'todos' && a.todos?.length) {
+      lines.push(`## Actions\n${a.todos.map(x => '☐ ' + x).join('\n')}`);
+    }
+    if (a.raw) lines.push(a.raw);
+  }
+
+  navigator.clipboard.writeText(lines.join('\n\n')).then(() => {
+    const orig = btn.textContent;
+    btn.textContent = '✓ Copié !';
+    setTimeout(() => btn.textContent = orig, 1500);
+  });
+}
+
+function copyTranscript(btn) {
+  navigator.clipboard.writeText(lastResults.transcript || '').then(() => {
+    const orig = btn.textContent;
+    btn.textContent = '✓ Copié !';
+    setTimeout(() => btn.textContent = orig, 1500);
+  });
+}
+
+// ── RESET ──
+function resetAll() {
+  clearFile();
+  lastResults = {};
+  document.getElementById('progressWrap').classList.remove('visible');
+  document.getElementById('resultsWrap').classList.remove('visible');
+  document.getElementById('resultsWrap').innerHTML = '';
+  document.getElementById('bottomActions').style.display = 'none';
+  document.getElementById('btnProcess').disabled = true;
+  hideError();
+  updateStepDots(0);
+  window.scrollTo({ top: 0, behavior: 'smooth' });
+}
+
+// ── PROGRESS HELPERS ──
+function setStep(n, state, text) {
+  const step = document.getElementById(`pStep${n}`);
+  const ind = document.getElementById(`pInd${n}`);
+  const txt = document.getElementById(`pTxt${n}`);
+  step.className = 'progress-step ' + state;
+  if (state === 'active') ind.innerHTML = '<div class="spinner"></div>';
+  else if (state === 'done') ind.textContent = '✅';
+  else if (state === 'error-step') ind.textContent = '❌';
+  else ind.textContent = '⬜';
+  if (text) txt.textContent = text;
+}
+
+function updateStepDots(step) {
+  const labels = ['Sélectionner un fichier', 'Choisir le type de notes', 'Résultats'];
+  for (let i = 0; i < 3; i++) {
+    const dot = document.getElementById(`dot${i}`);
+    dot.className = 'step-dot' + (i < step ? ' done' : i === step ? ' active' : '');
+  }
+  document.getElementById('stepLabel').textContent = labels[Math.min(step, 2)];
+}
+
+// ── UTILS ──
+function showError(msg) {
+  const el = document.getElementById('errorMsg');
+  el.textContent = '⚠️ ' + msg;
+  el.classList.add('visible');
+}
+function hideError() {
+  document.getElementById('errorMsg').classList.remove('visible');
+}
+function showToast(msg) {
+  const t = document.getElementById('toast');
+  t.textContent = msg;
+  t.classList.add('show');
+  setTimeout(() => t.classList.remove('show'), 2500);
+}
+function escHTML(s) {
+  return s.replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;').replace(/"/g,'&quot;');
+}
+function escJS(s) {
+  return s.replace(/`/g,'\\`').replace(/\$/g,'\\$');
+}
+</script>
+</body>
+</html>
